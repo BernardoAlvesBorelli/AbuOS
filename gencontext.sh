@@ -1,0 +1,1 @@
+find . -maxdepth 3 \( -name "*.[ch]" -o -name "*.asm" -o -name "Makefile" -o -name "*.ld" \) -not -path "*/obj/*" -not -path "*/bin/*" | xargs -I {} sh -c 'echo "--- FILE: {} ---"; cat {}; echo "\n"' > contexto.txt

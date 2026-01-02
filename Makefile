@@ -10,14 +10,14 @@ BIN_DIR = bin
 TARGET = $(BIN_DIR)/myos.bin
 LINKER_SCRIPT = linker.ld
 
-# Lista de objetos automática
+# Lista de objetos (Adicionamos os novos arquivos da libc)
 OBJS = $(OBJ_DIR)/boot.o \
        $(OBJ_DIR)/kernel.o \
-       $(OBJ_DIR)/video/video.o
+       $(OBJ_DIR)/video/video.o \
+       $(OBJ_DIR)/libc/stdio.o
 
-# Flags (Adicionado -Isrc para o compilador achar o video.h facilmente)
+CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -I$(SRC_DIR)
 ASFLAGS = -f elf32
-CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -Isrc
 LDFLAGS = -m elf_i386 -T $(LINKER_SCRIPT)
 
 all: $(TARGET)
@@ -25,16 +25,16 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	@mkdir -p $(BIN_DIR)
 	$(LD) $(LDFLAGS) -o $(TARGET) $(OBJS)
+	@echo "Kernel e Libc vinculados com sucesso!"
 
-# Regra para arquivos Assembly
-$(OBJ_DIR)/boot.o: $(SRC_DIR)/boot.asm
-	@mkdir -p $(OBJ_DIR)
-	$(AS) $(ASFLAGS) $< -o $@
-
-# Regra genérica para arquivos C (incluindo subpastas)
+# Regra genérica para arquivos C (Cria pastas automaticamente em obj/)
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/boot.o: $(SRC_DIR)/boot.asm
+	@mkdir -p $(OBJ_DIR)
+	$(AS) $(ASFLAGS) $< -o $@
 
 run: $(TARGET)
 	$(EMU) -kernel $(TARGET)

@@ -1,0 +1,246 @@
+--- FILE: ./src/boot.asm ---
+; Sintaxe Intel
+bits 32
+
+; Definições do Multiboot (Padrão para ser reconhecido pelo QEMU/GRUB)
+MBOOT_PAGE_ALIGN    equ 1 << 0
+MBOOT_MEM_INFO      equ 1 << 1
+MBOOT_HEADER_MAGIC  equ 0x1BADB002
+MBOOT_HEADER_FLAGS  equ MBOOT_PAGE_ALIGN | MBOOT_MEM_INFO
+MBOOT_CHECKSUM      equ -(MBOOT_HEADER_MAGIC + MBOOT_HEADER_FLAGS)
+
+section .multiboot
+    align 4
+    dd MBOOT_HEADER_MAGIC
+    dd MBOOT_HEADER_FLAGS
+    dd MBOOT_CHECKSUM
+
+section .bss
+    align 16
+    stack_bottom:
+        resb 16384 ; Reserva 16 KB para a pilha
+    stack_top:
+
+section .text
+    global _start
+    extern kmain ; Declara que kmain está em outro arquivo (C)
+
+_start:
+    ; Configura a pilha (stack pointer)
+    mov esp, stack_top
+
+    ; Entra no kernel principal (C)
+    call kmain
+
+    ; Loop infinito caso o kernel retorne
+    cli
+.hang:
+    hlt
+    jmp .hang\n
+--- FILE: ./src/kernel.c ---
+#include "libc/stdio.h"
+#include "video/video.h"
+
+void kmain() {
+    video_clear_screen();
+
+    println("Kernel 32-bit pronto.");
+    
+    puts("Inteiro comum: ");
+    puti(123456);
+    
+    puts("\nNegativo: ");
+    puti(-789);
+
+    video_putchar('\n', VIDEO_COLOR_WHITE_ON_BLACK);
+}\n
+--- FILE: ./src/video/video.c ---
+#include "video.h"
+
+#define VGA_WIDTH 80
+#define VGA_HEIGHT 25
+#define VGA_ADDRESS 0xB8000
+
+static int cursor_x = 0;
+static int cursor_y = 0;
+
+void video_clear_screen() {
+    unsigned short* buffer = (unsigned short*)VGA_ADDRESS;
+    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
+        buffer[i] = (unsigned short)' ' | (VIDEO_COLOR_WHITE_ON_BLACK << 8);
+    }
+    cursor_x = 0;
+    cursor_y = 0;
+}
+
+void video_putchar(char c, unsigned char color) {
+    unsigned short* buffer = (unsigned short*)VGA_ADDRESS;
+    if (c == '\n') {
+        cursor_x = 0;
+        cursor_y++;
+    } else {
+        int index = (cursor_y * VGA_WIDTH) + cursor_x;
+        buffer[index] = (unsigned short)c | (color << 8);
+        cursor_x++;
+    }
+    if (cursor_x >= VGA_WIDTH) { cursor_x = 0; cursor_y++; }
+    if (cursor_y >= VGA_HEIGHT) { video_clear_screen(); }
+}
+
+void video_print(const char* str, unsigned char color) {
+    for (int i = 0; str[i] != '\0'; i++) {
+        video_putchar(str[i], color);
+    }
+}
+
+void video_puti(int n, unsigned char color) {
+    if (n == 0) {
+        video_putchar('0', color);
+        return;
+    }
+    if (n < 0) {
+        video_putchar('-', color);
+        n = -n;
+    }
+    char buffer[12];
+    int i = 0;
+    while (n > 0) {
+        buffer[i++] = (n % 10) + '0';
+        n /= 10;
+    }
+    while (--i >= 0) {
+        video_putchar(buffer[i], color);
+    }
+}\n
+--- FILE: ./src/video/video.h ---
+#ifndef VIDEO_H
+#define VIDEO_H
+
+#define VIDEO_COLOR_WHITE_ON_BLACK 0x0F
+#define VIDEO_COLOR_GREEN_ON_BLACK 0x0A
+
+void video_clear_screen();
+void video_putchar(char c, unsigned char color);
+void video_print(const char* str, unsigned char color);
+void video_puti(int n, unsigned char color);
+
+#endif\n
+--- FILE: ./src/libc/stdint.h ---
+#ifndef STDINT_H
+#define STDINT_H
+
+// O 'int' comum já é 32-bit assinado nesta arquitetura.
+// Definimos apenas os tipos de tamanhos específicos:
+typedef signed char        int8_t;
+typedef unsigned char      uint8_t;
+
+typedef short              int16_t;
+typedef unsigned short     uint16_t;
+
+typedef unsigned int       uint32_t; // int de 32 bits sem sinal
+
+typedef long long          int64_t;
+typedef unsigned long long uint64_t;
+
+#endif\n
+--- FILE: ./src/libc/stdio.h ---
+#ifndef STDIO_H
+#define STDIO_H
+
+void puts(const char* str);
+void println(const char* str);
+void puti(int n);
+
+#endif\n
+--- FILE: ./src/libc/stdio.c ---
+#include "stdio.h"
+#include "video/video.h"
+
+void puts(const char* str) {
+    video_print(str, VIDEO_COLOR_WHITE_ON_BLACK);
+}
+
+void println(const char* str) {
+    puts(str);
+    video_putchar('\n', VIDEO_COLOR_WHITE_ON_BLACK);
+}
+
+void puti(int n) {
+    video_puti(n, VIDEO_COLOR_WHITE_ON_BLACK);
+}\n
+--- FILE: ./linker.ld ---
+ENTRY(_start)
+
+SECTIONS
+{
+    /* O kernel começa tradicionalmente em 1MB */
+    . = 1M;
+
+    .text BLOCK(4K) : ALIGN(4K)
+    {
+        *(.multiboot)
+        *(.text)
+    }
+
+    .rodata BLOCK(4K) : ALIGN(4K)
+    {
+        *(.rodata)
+    }
+
+    .data BLOCK(4K) : ALIGN(4K)
+    {
+        *(.data)
+    }
+
+    .bss BLOCK(4K) : ALIGN(4K)
+    {
+        *(COMMON)
+        *(.bss)
+    }
+}\n
+--- FILE: ./Makefile ---
+AS = nasm
+CC = gcc
+LD = ld
+EMU = qemu-system-i386
+
+SRC_DIR = src
+OBJ_DIR = obj
+BIN_DIR = bin
+
+TARGET = $(BIN_DIR)/myos.bin
+LINKER_SCRIPT = linker.ld
+
+# Lista de objetos (Adicionamos os novos arquivos da libc)
+OBJS = $(OBJ_DIR)/boot.o \
+       $(OBJ_DIR)/kernel.o \
+       $(OBJ_DIR)/video/video.o \
+       $(OBJ_DIR)/libc/stdio.o
+
+CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -I$(SRC_DIR)
+ASFLAGS = -f elf32
+LDFLAGS = -m elf_i386 -T $(LINKER_SCRIPT)
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	@mkdir -p $(BIN_DIR)
+	$(LD) $(LDFLAGS) -o $(TARGET) $(OBJS)
+	@echo "Kernel e Libc vinculados com sucesso!"
+
+# Regra genérica para arquivos C (Cria pastas automaticamente em obj/)
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/boot.o: $(SRC_DIR)/boot.asm
+	@mkdir -p $(OBJ_DIR)
+	$(AS) $(ASFLAGS) $< -o $@
+
+run: $(TARGET)
+	$(EMU) -kernel $(TARGET)
+
+clean:
+	rm -rf $(OBJ_DIR) $(BIN_DIR)
+
+.PHONY: all run clean\n
