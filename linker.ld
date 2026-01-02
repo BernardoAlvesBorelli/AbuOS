@@ -1,0 +1,29 @@
+ENTRY(_start)
+
+SECTIONS
+{
+    /* O kernel começa tradicionalmente em 1MB */
+    . = 1M;
+
+    .text BLOCK(4K) : ALIGN(4K)
+    {
+        *(.multiboot)
+        *(.text)
+    }
+
+    .rodata BLOCK(4K) : ALIGN(4K)
+    {
+        *(.rodata)
+    }
+
+    .data BLOCK(4K) : ALIGN(4K)
+    {
+        *(.data)
+    }
+
+    .bss BLOCK(4K) : ALIGN(4K)
+    {
+        *(COMMON)
+        *(.bss)
+    }
+}
