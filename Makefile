@@ -14,7 +14,8 @@ LINKER_SCRIPT = linker.ld
 OBJS = $(OBJ_DIR)/boot.o \
        $(OBJ_DIR)/kernel.o \
        $(OBJ_DIR)/video/video.o \
-       $(OBJ_DIR)/libc/stdio.o
+       $(OBJ_DIR)/libc/stdio.o \
+	   $(OBJ_DIR)/gdt.o
 
 CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -I$(SRC_DIR)
 ASFLAGS = -f elf32

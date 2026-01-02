@@ -55,3 +55,11 @@ void video_puti(int n, unsigned char color) {
         video_putchar(buffer[i], color);
     }
 }
+
+void video_puth(uint32_t n, unsigned char color) {
+    char *chars = "0123456789ABCDEF";
+    video_print("0x", color);
+    for (int i = 28; i >= 0; i -= 4) {
+        video_putchar(chars[(n >> i) & 0xF], color);
+    }
+}

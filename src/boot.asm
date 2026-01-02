@@ -22,17 +22,33 @@ section .bss
 
 section .text
     global _start
-    extern kmain ; Declara que kmain está em outro arquivo (C)
+    extern kmain
+    global gdt_flush
 
 _start:
-    ; Configura a pilha (stack pointer)
     mov esp, stack_top
 
-    ; Entra no kernel principal (C)
+    push ebx
+    push eax
+
     call kmain
 
-    ; Loop infinito caso o kernel retorne
-    cli
+; Loop de segurança caso a kmain retorne
 .hang:
+    cli
     hlt
     jmp .hang
+
+; Função de utilidade (chamada pelo C)
+gdt_flush:
+    mov eax, [esp + 4]
+    lgdt [eax]
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    jmp 0x08:.flush
+.flush:
+    ret
