@@ -2,7 +2,7 @@
 ; Sintaxe Intel
 bits 32
 
-; Definições do Multiboot (Padrão para ser reconhecido pelo QEMU/GRUB)
+; Definições do Multiboot
 MBOOT_PAGE_ALIGN    equ 1 << 0
 MBOOT_MEM_INFO      equ 1 << 1
 MBOOT_HEADER_MAGIC  equ 0x1BADB002
@@ -24,23 +24,24 @@ section .bss
 section .text
     global _start
     extern kmain
+    extern fault_handler ; Para exceções (0-31)
+    extern irq_handler   ; Para hardware (32-47)
+
     global gdt_flush
+    global idt_load
 
 _start:
     mov esp, stack_top
-
-    push ebx
-    push eax
-
+    push ebx ; Multiboot info
+    push eax ; Magic number
     call kmain
 
-; Loop de segurança caso a kmain retorne
 .hang:
     cli
     hlt
     jmp .hang
 
-; Função de utilidade (chamada pelo C)
+; --- GDT Utility ---
 gdt_flush:
     mov eax, [esp + 4]
     lgdt [eax]
@@ -52,38 +53,190 @@ gdt_flush:
     mov ss, ax
     jmp 0x08:.flush
 .flush:
-    ret\n
+    ret
+
+; --- IDT Utility ---
+idt_load:
+    mov eax, [esp + 4]
+    lidt [eax]
+    sti ; Habilita interrupções após carregar a IDT
+    ret
+
+; --- Macros para ISR (Exceções 0-31) ---
+%macro ISR_NOERRCODE 1
+  global isr%1
+  isr%1:
+    push byte 0
+    push byte %1
+    jmp isr_common_stub
+%endmacro
+
+%macro ISR_ERRCODE 1
+  global isr%1
+  isr%1:
+    push byte %1
+    jmp isr_common_stub
+%endmacro
+
+; --- Macros para IRQ (Hardware 32-47) ---
+%macro IRQ 2
+  global irq%1
+  irq%1:
+    push byte 0
+    push byte %2
+    jmp irq_common_stub
+%endmacro
+
+; Definindo as 32 Exceções da CPU
+ISR_NOERRCODE 0
+ISR_NOERRCODE 1
+ISR_NOERRCODE 2
+ISR_NOERRCODE 3
+ISR_NOERRCODE 4
+ISR_NOERRCODE 5
+ISR_NOERRCODE 6
+ISR_NOERRCODE 7
+ISR_ERRCODE   8
+ISR_NOERRCODE 9
+ISR_ERRCODE   10
+ISR_ERRCODE   11
+ISR_ERRCODE   12
+ISR_ERRCODE   13
+ISR_ERRCODE   14
+ISR_NOERRCODE 15
+ISR_NOERRCODE 16
+ISR_ERRCODE   17
+ISR_NOERRCODE 18
+ISR_NOERRCODE 19
+ISR_NOERRCODE 20
+ISR_NOERRCODE 21
+ISR_NOERRCODE 22
+ISR_NOERRCODE 23
+ISR_NOERRCODE 24
+ISR_NOERRCODE 25
+ISR_NOERRCODE 26
+ISR_NOERRCODE 27
+ISR_NOERRCODE 28
+ISR_NOERRCODE 29
+ISR_ERRCODE   30
+ISR_NOERRCODE 31
+
+; Definindo as 16 IRQs (Mapeadas para 32-47 no C)
+IRQ 0, 32
+IRQ 1, 33
+IRQ 2, 34
+IRQ 3, 35
+IRQ 4, 36
+IRQ 5, 37
+IRQ 6, 38
+IRQ 7, 39
+IRQ 8, 40
+IRQ 9, 41
+IRQ 10, 42
+IRQ 11, 43
+IRQ 12, 44
+IRQ 13, 45
+IRQ 14, 46
+IRQ 15, 47
+
+; Stub Comum para Exceções
+isr_common_stub:
+    pusha
+    mov ax, ds
+    push eax
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    push esp
+    call fault_handler
+    pop eax
+    pop eax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    popa
+    add esp, 8
+    iret
+
+; Stub Comum para Interrupções de Hardware (IRQs)
+irq_common_stub:
+    pusha
+    mov ax, ds
+    push eax
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    push esp
+    call irq_handler
+    pop eax
+    pop eax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    popa
+    add esp, 8
+    iret\n
 --- FILE: ./src/kernel.c ---
 #include "libc/stdio.h"
 #include "video/video.h"
 #include "multiboot.h"
 #include "gdt.h"
+#include "idt.h"
+#include "timer.h"
+#include "keyboard.h"
 
 void kmain(uint32_t magic, struct multiboot_info* mbi) {
     video_clear_screen();
-
+    
     if (magic != 0x2BADB002) panic("Multiboot Magic invalido!");
 
-    // Inicializa a GDT
     init_gdt();
-    println("GDT inicializada.");
+    init_idt();
+    init_timer(100); 
 
-    if (mbi->flags & (1 << 0)) {
-        puts("Memoria RAM detectada: ");
-        // mem_upper está em KB. Convertendo para MB para ler melhor.
-        puti((mbi->mem_upper / 1024) + 1); 
-        println(" MB");
-    }
-
+    println("GDT, IDT e Timer (100Hz) configurados.");
+    
+    // Usa o mbi para evitar o warning
     if (mbi->flags & (1 << 9)) {
         puts("Bootloader: ");
         println((const char*)mbi->boot_loader_name);
     }
 
-    println("Sistema estavel e em modo protegido.");
+    println("Sistema pronto (IRQ Segura).");
+
+    static uint32_t last_tick = 0;
+
+    while(1) {
+        // 1. Processa Teclado (Contexto de Kernel, não de IRQ)
+        char c = keyboard_getchar();
+        if (c > 0) {
+            video_putchar(c, VIDEO_COLOR_WHITE_ON_BLACK);
+        }
+
+        // 2. Lógica do Spinner
+        uint32_t current_tick = get_ticks();
+        if (current_tick != last_tick) {
+            static char *spinner = "/-\\|";
+            unsigned short* video_mem = (unsigned short*)0xB8000;
+            // Protegemos a escrita direta do spinner
+            __asm__ volatile("cli");
+            video_mem[79] = (unsigned short)spinner[current_tick % 4] | (0x0A << 8);
+            __asm__ volatile("sti");
+            last_tick = current_tick;
+        }
+
+        __asm__ volatile("hlt");
+    }
 }\n
 --- FILE: ./src/video/video.c ---
 #include "video.h"
+#include "libc/io.h"
 
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
@@ -91,6 +244,7 @@ void kmain(uint32_t magic, struct multiboot_info* mbi) {
 
 static int cursor_x = 0;
 static int cursor_y = 0;
+static volatile int vga_lock = 0;
 
 void video_clear_screen() {
     unsigned short* buffer = (unsigned short*)VGA_ADDRESS;
@@ -103,16 +257,25 @@ void video_clear_screen() {
 
 void video_putchar(char c, unsigned char color) {
     unsigned short* buffer = (unsigned short*)VGA_ADDRESS;
+    
     if (c == '\n') {
         cursor_x = 0;
         cursor_y++;
+    } else if (c == '\b') {
+        if (cursor_x > 0) cursor_x--;
+        // Opcional: limpar o caractere visualmente
+        buffer[(cursor_y * VGA_WIDTH) + cursor_x] = (unsigned short)' ' | (color << 8);
     } else {
-        int index = (cursor_y * VGA_WIDTH) + cursor_x;
-        buffer[index] = (unsigned short)c | (color << 8);
+        buffer[(cursor_y * VGA_WIDTH) + cursor_x] = (unsigned short)c | (color << 8);
         cursor_x++;
     }
+
     if (cursor_x >= VGA_WIDTH) { cursor_x = 0; cursor_y++; }
-    if (cursor_y >= VGA_HEIGHT) { video_clear_screen(); }
+    if (cursor_y >= VGA_HEIGHT) {
+        // Por enquanto, apenas reseta o cursor em vez de scroll pesado
+        cursor_x = 0;
+        cursor_y = 0;
+    }
 }
 
 void video_print(const char* str, unsigned char color) {
@@ -122,23 +285,12 @@ void video_print(const char* str, unsigned char color) {
 }
 
 void video_puti(int n, unsigned char color) {
-    if (n == 0) {
-        video_putchar('0', color);
-        return;
-    }
-    if (n < 0) {
-        video_putchar('-', color);
-        n = -n;
-    }
+    if (n == 0) { video_putchar('0', color); return; }
+    if (n < 0) { video_putchar('-', color); n = -n; }
     char buffer[12];
     int i = 0;
-    while (n > 0) {
-        buffer[i++] = (n % 10) + '0';
-        n /= 10;
-    }
-    while (--i >= 0) {
-        video_putchar(buffer[i], color);
-    }
+    while (n > 0) { buffer[i++] = (n % 10) + '0'; n /= 10; }
+    while (--i >= 0) { video_putchar(buffer[i], color); }
 }
 
 void video_puth(uint32_t n, unsigned char color) {
@@ -213,16 +365,30 @@ void puti(int n) {
 }
 
 void panic(const char* message) {
-    video_clear_screen();
-    video_print("!!! KERNEL PANIC !!!\n", VIDEO_COLOR_RED_ON_BLACK);
-    video_print("Erro: ", VIDEO_COLOR_RED_ON_BLACK);
+    // Não vamos limpar a tela aqui, deixamos para quem chamou decidir
+    video_print("\n--- KERNEL PANIC ---\n", VIDEO_COLOR_RED_ON_BLACK);
+    video_print("INFO: ", VIDEO_COLOR_RED_ON_BLACK);
     video_print(message, VIDEO_COLOR_WHITE_ON_BLACK);
     
-    // Para o processador
-    while(1) {
-        __asm__("cli; hlt"); 
-    }
+    while(1) { __asm__("cli; hlt"); }
 }\n
+--- FILE: ./src/libc/io.h ---
+#ifndef IO_H
+#define IO_H
+
+#include "stdint.h"
+
+static inline void outb(uint16_t port, uint8_t val) {
+    __asm__ volatile ( "outb %0, %1" : : "a"(val), "Nd"(port) );
+}
+
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    __asm__ volatile ( "inb %1, %0" : "=a"(ret) : "Nd"(port) );
+    return ret;
+}
+
+#endif\n
 --- FILE: ./src/multiboot.h ---
 #ifndef MULTIBOOT_H
 #define MULTIBOOT_H
@@ -301,6 +467,236 @@ void init_gdt() {
 
     gdt_flush((uint32_t)&gp);
 }\n
+--- FILE: ./src/idt.h ---
+#ifndef IDT_H
+#define IDT_H
+
+#include "libc/stdint.h"
+
+struct idt_entry {
+    uint16_t base_low;
+    uint16_t sel;        // Segmento de código (GDT)
+    uint8_t  always0;
+    uint8_t  flags;
+    uint16_t base_high;
+} __attribute__((packed));
+
+struct idt_ptr {
+    uint16_t limit;
+    uint32_t base;
+} __attribute__((packed));
+
+// Registradores passados para o tratador C quando ocorre uma exceção
+struct regs {
+    uint32_t ds;
+    uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax; // pusha
+    uint32_t int_no, err_code;    // empurrados manualmente no asm
+    uint32_t eip, cs, eflags, useresp, ss; // empurrados pelo processador
+};
+
+void init_idt();
+
+#endif\n
+--- FILE: ./src/idt.c ---
+#include "idt.h"
+#include "libc/stdio.h"
+#include "libc/io.h"
+#include "video/video.h"
+#include "keyboard.h"
+#include "timer.h"
+
+struct idt_entry idt[256];
+struct idt_ptr idtp;
+
+// --- Declarações Externas dos Stubs do boot.asm ---
+// Exceções (0-31)
+extern void isr0();  extern void isr1();  extern void isr2();  extern void isr3();
+extern void isr4();  extern void isr5();  extern void isr6();  extern void isr7();
+extern void isr8();  extern void isr9();  extern void isr10(); extern void isr11();
+extern void isr12(); extern void isr13(); extern void isr14(); extern void isr15();
+extern void isr16(); extern void isr17(); extern void isr18(); extern void isr19();
+extern void isr20(); extern void isr21(); extern void isr22(); extern void isr23();
+extern void isr24(); extern void isr25(); extern void isr26(); extern void isr27();
+extern void isr28(); extern void isr29(); extern void isr30(); extern void isr31();
+
+// Hardware (32-47)
+extern void irq0();  extern void irq1();  extern void irq2();  extern void irq3();
+extern void irq4();  extern void irq5();  extern void irq6();  extern void irq7();
+extern void irq8();  extern void irq9();  extern void irq10(); extern void irq11();
+extern void irq12(); extern void irq13(); extern void irq14(); extern void irq15();
+
+extern void idt_load(uint32_t);
+
+// Mensagens amigáveis para as 32 exceções da arquitetura x86
+char *exception_messages[] = {
+    "Division By Zero", "Debug", "Non Maskable Interrupt", "Breakpoint",
+    "Into Detected Overflow", "Out of Bounds", "Invalid Opcode", "No Coprocessor",
+    "Double Fault", "Coprocessor Segment Overrun", "Bad TSS", "Segment Not Present",
+    "Stack Fault", "General Protection Fault", "Page Fault", "Unknown Interrupt",
+    "x87 FPU Floating-Point Error", "Alignment Check", "Machine Check", "SIMD Floating-Point Exception",
+    "Virtualization Exception", "Control Protection Exception", "Reserved", "Reserved",
+    "Reserved", "Reserved", "Reserved", "Reserved", "Reserved",
+    "Reserved", "Reserved", "Reserved"
+};
+
+void irq_remap() {
+    outb(0x20, 0x11); outb(0xA0, 0x11);
+    outb(0x21, 0x20); outb(0xA1, 0x28);
+    outb(0x21, 0x04); outb(0xA1, 0x02);
+    outb(0x21, 0x01); outb(0xA1, 0x01);
+    outb(0x21, 0x0);  outb(0xA1, 0x0);
+}
+
+void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
+    idt[num].base_low = (base & 0xFFFF);
+    idt[num].base_high = (base >> 16) & 0xFFFF;
+    idt[num].sel = sel;
+    idt[num].always0 = 0;
+    idt[num].flags = flags;
+}
+
+void init_idt() {
+    idtp.limit = (sizeof(struct idt_entry) * 256) - 1;
+    idtp.base = (uint32_t)&idt;
+
+    irq_remap();
+
+    // Mapeamento das Exceções (0-31)
+    idt_set_gate(0,  (uint32_t)isr0,  0x08, 0x8E); idt_set_gate(1,  (uint32_t)isr1,  0x08, 0x8E);
+    idt_set_gate(2,  (uint32_t)isr2,  0x08, 0x8E); idt_set_gate(3,  (uint32_t)isr3,  0x08, 0x8E);
+    idt_set_gate(4,  (uint32_t)isr4,  0x08, 0x8E); idt_set_gate(5,  (uint32_t)isr5,  0x08, 0x8E);
+    idt_set_gate(6,  (uint32_t)isr6,  0x08, 0x8E); idt_set_gate(7,  (uint32_t)isr7,  0x08, 0x8E);
+    idt_set_gate(8,  (uint32_t)isr8,  0x08, 0x8E); idt_set_gate(9,  (uint32_t)isr9,  0x08, 0x8E);
+    idt_set_gate(10, (uint32_t)isr10, 0x08, 0x8E); idt_set_gate(11, (uint32_t)isr11, 0x08, 0x8E);
+    idt_set_gate(12, (uint32_t)isr12, 0x08, 0x8E); idt_set_gate(13, (uint32_t)isr13, 0x08, 0x8E);
+    idt_set_gate(14, (uint32_t)isr14, 0x08, 0x8E); idt_set_gate(15, (uint32_t)isr15, 0x08, 0x8E);
+    idt_set_gate(16, (uint32_t)isr16, 0x08, 0x8E); idt_set_gate(17, (uint32_t)isr17, 0x08, 0x8E);
+    idt_set_gate(18, (uint32_t)isr18, 0x08, 0x8E); idt_set_gate(19, (uint32_t)isr19, 0x08, 0x8E);
+    idt_set_gate(20, (uint32_t)isr20, 0x08, 0x8E); idt_set_gate(21, (uint32_t)isr21, 0x08, 0x8E);
+    idt_set_gate(22, (uint32_t)isr22, 0x08, 0x8E); idt_set_gate(23, (uint32_t)isr23, 0x08, 0x8E);
+    idt_set_gate(24, (uint32_t)isr24, 0x08, 0x8E); idt_set_gate(25, (uint32_t)isr25, 0x08, 0x8E);
+    idt_set_gate(26, (uint32_t)isr26, 0x08, 0x8E); idt_set_gate(27, (uint32_t)isr27, 0x08, 0x8E);
+    idt_set_gate(28, (uint32_t)isr28, 0x08, 0x8E); idt_set_gate(29, (uint32_t)isr29, 0x08, 0x8E);
+    idt_set_gate(30, (uint32_t)isr30, 0x08, 0x8E); idt_set_gate(31, (uint32_t)isr31, 0x08, 0x8E);
+
+    // Mapeamento das IRQs de Hardware (32-47)
+    idt_set_gate(32, (uint32_t)irq0,  0x08, 0x8E); idt_set_gate(33, (uint32_t)irq1,  0x08, 0x8E);
+    idt_set_gate(34, (uint32_t)irq2,  0x08, 0x8E); idt_set_gate(35, (uint32_t)irq3,  0x08, 0x8E);
+    idt_set_gate(36, (uint32_t)irq4,  0x08, 0x8E); idt_set_gate(37, (uint32_t)irq5,  0x08, 0x8E);
+    idt_set_gate(38, (uint32_t)irq6,  0x08, 0x8E); idt_set_gate(39, (uint32_t)irq7,  0x08, 0x8E);
+    idt_set_gate(40, (uint32_t)irq8,  0x08, 0x8E); idt_set_gate(41, (uint32_t)irq9,  0x08, 0x8E);
+    idt_set_gate(42, (uint32_t)irq10, 0x08, 0x8E); idt_set_gate(43, (uint32_t)irq11, 0x08, 0x8E);
+    idt_set_gate(44, (uint32_t)irq12, 0x08, 0x8E); idt_set_gate(45, (uint32_t)irq13, 0x08, 0x8E);
+    idt_set_gate(46, (uint32_t)irq14, 0x08, 0x8E); idt_set_gate(47, (uint32_t)irq15, 0x08, 0x8E);
+
+    idt_load((uint32_t)&idtp);
+}
+
+void fault_handler(struct regs *r) {
+    video_clear_screen();
+    video_print("EXCECAO CRITICA DA CPU: ", VIDEO_COLOR_RED_ON_BLACK);
+    
+    if (r->int_no < 32) {
+        puts(exception_messages[r->int_no]);
+    } else {
+        puts("Desconhecida");
+    }
+
+    puts("\nInt No: "); puti(r->int_no);
+    puts(" | Err Code: "); puti(r->err_code);
+    panic("O sistema foi interrompido para evitar danos.");
+}
+
+void irq_handler(struct regs *r) {
+    // Ack PIC
+    if (r->int_no >= 40) outb(0xA0, 0x20);
+    outb(0x20, 0x20);
+
+    // Dispatcher limpo
+    if (r->int_no == 32) timer_handler();
+    if (r->int_no == 33) keyboard_handler();
+}
+\n
+--- FILE: ./src/keyboard.h ---
+#ifndef KEYBOARD_H
+#define KEYBOARD_H
+#include "libc/stdint.h"
+
+void keyboard_handler(); // Chamada pelo idt.c
+char keyboard_getchar(); // Chamada pelo kmain (Thread context)
+
+#endif\n
+--- FILE: ./src/keyboard.c ---
+#include "keyboard.h"
+#include "libc/io.h"
+
+static unsigned char kbd_us[128] = {
+    0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
+    '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
+    0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',   0,
+    '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/',   0, '*',
+    0, ' ', 0
+};
+
+#define KBD_BUFFER_SIZE 256
+static volatile char key_buffer[KBD_BUFFER_SIZE];
+static volatile uint32_t head = 0;
+static volatile uint32_t tail = 0;
+
+void keyboard_handler() {
+    uint8_t scancode = inb(0x60);
+    
+    if (!(scancode & 0x80)) { // Make code
+        char c = kbd_us[scancode];
+        if (c > 0) {
+            uint32_t next = (head + 1) % KBD_BUFFER_SIZE;
+            if (next != tail) { // Só insere se o buffer não estiver cheio
+                key_buffer[head] = c;
+                head = next;
+            }
+        }
+    }
+}
+
+char keyboard_getchar() {
+    if (head == tail) return 0; // Vazio
+    
+    char c = key_buffer[tail];
+    tail = (tail + 1) % KBD_BUFFER_SIZE;
+    return c;
+}\n
+--- FILE: ./src/timer.h ---
+#ifndef TIMER_H
+#define TIMER_H
+#include "libc/stdint.h"
+
+void init_timer(uint32_t frequency);
+uint32_t get_ticks();
+void timer_handler(); // Chamada pelo idt.c
+
+#endif\n
+--- FILE: ./src/timer.c ---
+#include "timer.h"
+#include "libc/io.h"
+
+// static: visível apenas neste arquivo
+// volatile: impede o compilador de otimizar acessos em loops do kernel
+static volatile uint32_t timer_ticks = 0;
+
+void timer_handler() {
+    timer_ticks++;
+}
+
+void init_timer(uint32_t frequency) {
+    uint32_t divisor = 1193180 / frequency;
+    outb(0x43, 0x36);
+    outb(0x40, (uint8_t)(divisor & 0xFF));
+    outb(0x40, (uint8_t)((divisor >> 8) & 0xFF));
+}
+
+uint32_t get_ticks() {
+    return timer_ticks;
+}\n
 --- FILE: ./linker.ld ---
 ENTRY(_start)
 
@@ -332,49 +728,81 @@ SECTIONS
     }
 }\n
 --- FILE: ./Makefile ---
+# Ferramentas
 AS = nasm
 CC = gcc
 LD = ld
 EMU = qemu-system-i386
 
+# Pastas
 SRC_DIR = src
 OBJ_DIR = obj
 BIN_DIR = bin
+ISO_DIR = iso_root
 
+# Arquivos
 TARGET = $(BIN_DIR)/myos.bin
+ISO_TARGET = $(BIN_DIR)/myos.iso
 LINKER_SCRIPT = linker.ld
 
-# Lista de objetos (Adicionamos os novos arquivos da libc)
+# Lista de objetos
 OBJS = $(OBJ_DIR)/boot.o \
        $(OBJ_DIR)/kernel.o \
        $(OBJ_DIR)/video/video.o \
        $(OBJ_DIR)/libc/stdio.o \
-	   $(OBJ_DIR)/gdt.o
+       $(OBJ_DIR)/gdt.o \
+	   $(OBJ_DIR)/idt.o \
+	   $(OBJ_DIR)/keyboard.o \
+	   $(OBJ_DIR)/timer.o
 
+# Flags
 CFLAGS = -m32 -ffreestanding -O2 -Wall -Wextra -I$(SRC_DIR)
 ASFLAGS = -f elf32
 LDFLAGS = -m elf_i386 -T $(LINKER_SCRIPT)
 
+# Regra padrão
 all: $(TARGET)
 
+# Linkagem do Kernel
 $(TARGET): $(OBJS)
 	@mkdir -p $(BIN_DIR)
 	$(LD) $(LDFLAGS) -o $(TARGET) $(OBJS)
-	@echo "Kernel e Libc vinculados com sucesso!"
+	@echo "Kernel e Libc vinculados com sucesso em $(TARGET)!"
 
-# Regra genérica para arquivos C (Cria pastas automaticamente em obj/)
+# Criação da ISO bootável
+iso: $(TARGET)
+	@mkdir -p $(ISO_DIR)/boot/grub
+	@cp $(TARGET) $(ISO_DIR)/boot/
+	@echo 'set timeout=0' > $(ISO_DIR)/boot/grub/grub.cfg
+	@echo 'set default=0' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo 'menuentry "Meu Sistema Operacional" {' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '    multiboot /boot/myos.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '    boot' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '}' >> $(ISO_DIR)/boot/grub/grub.cfg
+	grub-mkrescue -o $(ISO_TARGET) $(ISO_DIR)
+	@echo "ISO criada com sucesso em $(ISO_TARGET)!"
+
+# Regra genérica para arquivos C
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# Regra para o arquivo de boot (Assembly)
 $(OBJ_DIR)/boot.o: $(SRC_DIR)/boot.asm
 	@mkdir -p $(OBJ_DIR)
 	$(AS) $(ASFLAGS) $< -o $@
 
+# Rodar no QEMU usando o kernel direto (rápido para teste)
 run: $(TARGET)
 	$(EMU) -kernel $(TARGET)
 
-clean:
-	rm -rf $(OBJ_DIR) $(BIN_DIR)
+# Rodar no QEMU usando a ISO (simula boot real com GRUB)
+run-iso: iso
+	$(EMU) -cdrom $(ISO_TARGET)
 
-.PHONY: all run clean\n
+# Limpeza completa
+clean:
+	rm -rf $(OBJ_DIR) $(BIN_DIR) $(ISO_DIR)
+
+.PHONY: all run run-iso clean iso\n

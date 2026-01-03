@@ -15,13 +15,10 @@ void puti(int n) {
 }
 
 void panic(const char* message) {
-    video_clear_screen();
-    video_print("!!! KERNEL PANIC !!!\n", VIDEO_COLOR_RED_ON_BLACK);
-    video_print("Erro: ", VIDEO_COLOR_RED_ON_BLACK);
+    // Não vamos limpar a tela aqui, deixamos para quem chamou decidir
+    video_print("\n--- KERNEL PANIC ---\n", VIDEO_COLOR_RED_ON_BLACK);
+    video_print("INFO: ", VIDEO_COLOR_RED_ON_BLACK);
     video_print(message, VIDEO_COLOR_WHITE_ON_BLACK);
     
-    // Para o processador
-    while(1) {
-        __asm__("cli; hlt"); 
-    }
+    while(1) { __asm__("cli; hlt"); }
 }
